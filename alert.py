@@ -74,6 +74,7 @@ LOG_PATH = BASE_DIR / "alert.log"
 TZ_CN = timezone(timedelta(hours=8))
 
 # 币安网页端 bapi，多个候选路径依次尝试（币安改版时按 --probe 输出改这里）
+BAPI_PUB = "https://www.binance.com/bapi/futures/v1/public/future/copy-trade"
 BAPI = "https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade"
 ENDPOINTS: Dict[str, List[str]] = {
     "positions": [
@@ -656,65 +657,96 @@ def tick(cfg: Dict[str, Any], state: Dict[str, Any], init_only: bool = False) ->
     return events
 
 
+def _post_json(
+    session: requests.Session, url: str, body: Dict[str, Any], cfg: Dict[str, Any]
+) -> Any:
+    last_err: Optional[Exception] = None
+    for attempt in range(int(cfg.get("retries", 2)) + 1):
+        try:
+            r = session.post(url, json=body, timeout=float(cfg.get("timeout_sec", 15)))
+            if r.status_code in (418, 429):
+                raise FetchError("被限流（418/429）")
+            if r.status_code == 451:
+                raise FetchError("451 地域限制")
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < int(cfg.get("retries", 2)):
+                time.sleep(1.5 * (attempt + 1))
+    raise FetchError(f"请求失败 {url} -> {last_err}")
+
+
+# 候选接口清单：(用途, 方法, 路径, 传参方式 q=query b=body)
+# 2025-11 实测：public 前缀下 trade-history 只吃 POST；friendly 前缀的 lead-data/* 是"我的跟单"而非带单员
+CANDIDATES: List[Tuple[str, str, str, str]] = [
+    ("detail",    "GET",  f"{BAPI_PUB}/lead-portfolio/detail",            "q"),
+    ("detail",    "POST", f"{BAPI_PUB}/lead-portfolio/detail",            "b"),
+    ("positions", "GET",  f"{BAPI_PUB}/lead-portfolio/position",          "q"),
+    ("positions", "POST", f"{BAPI_PUB}/lead-portfolio/position",          "b"),
+    ("positions", "POST", f"{BAPI_PUB}/lead-portfolio/positions",         "b"),
+    ("positions", "POST", f"{BAPI_PUB}/lead-portfolio/position-list",     "b"),
+    ("positions", "POST", f"{BAPI_PUB}/lead-portfolio/positionSnapshot",  "b"),
+    ("positions", "GET",  f"{BAPI}/lead-data/positions",                  "q"),
+    ("positions", "POST", f"{BAPI}/lead-data/positions",                  "b"),
+    ("positions", "POST", f"{BAPI}/lead-portfolio/position",              "b"),
+    ("positions", "GET",  f"{BAPI}/lead-portfolio/position",              "q"),
+    ("history",   "POST", f"{BAPI_PUB}/lead-portfolio/trade-history",     "b"),
+    ("history",   "GET",  f"{BAPI_PUB}/lead-portfolio/trade-history",     "q"),
+]
+
+
+def _peek_list(data: Any) -> Optional[List[Any]]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for k in ("list", "rows", "positionList", "positions", "data", "items"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return v
+    return None
+
+
 def cmd_probe(cfg: Dict[str, Any]) -> None:
+    """逐个试候选接口，把「哪条路能出数据」一次打清楚。"""
     pid = str(cfg["portfolio_id"]).strip()
     print(f"portfolioId = {pid or '(空)'}")
     if not pid:
-        sys.exit("请用 --pid 指定带单员 ID，或先在 config.json 里填 portfolio_id")
+        sys.exit("请用 --pid 指定带单员 ID")
     session = _session(cfg)
+    ok: Dict[str, Tuple[str, str, str]] = {}
+    print(f"开始探测 {len(CANDIDATES)} 条候选接口（OK=拿到数据，--=不通或空）\n")
 
-    # 先确认「这个人是谁」——避免 ID 抄错监控到陌生人
-    print("\n===== 身份核对 detail =====")
-    who = None
-    for url in ENDPOINTS["detail"]:
+    for kind, method, url, style in CANDIDATES:
+        short = url.split("/copy-trade")[-1]
+        body = {"portfolioId": pid, "pageNumber": 1, "pageSize": 10}
         try:
-            payload = _get_json(session, url, {"portfolioId": pid}, cfg)
-            data = payload.get("data") if isinstance(payload, dict) else None
-            if isinstance(data, dict):
-                for k in ("nickname", "portfolioName", "leadName", "userName"):
-                    if data.get(k):
-                        who = str(data[k])
-                        break
-            print(f"[OK] {url}")
-            if who:
-                print(f"\n  带单员昵称：{who}")
-                print(f"  → 和你看到的「熬鹰资本」一致就说明 ID 没抄错\n")
+            if method == "GET":
+                payload = _get_json(session, url, body, cfg)
             else:
-                print("  接口通了，但没识别出昵称字段，原始返回：")
-                print(json.dumps(payload, ensure_ascii=False)[:800])
-            break
+                payload = _post_json(session, url, body, cfg)
+            code = payload.get("code") if isinstance(payload, dict) else None
+            data = payload.get("data") if isinstance(payload, dict) else payload
+            lst = _peek_list(data)
+            n = len(lst) if lst is not None else -1
+            flag = "OK " if (code in ("000000", "0", 200, None) and n > 0) else "-- "
+            if flag == "OK " and kind not in ok:
+                ok[kind] = (method, url, style)
+            print(f"{flag}[{method}] {short}  code={code} n={n}")
+            if payload is not None:
+                print("     " + json.dumps(payload, ensure_ascii=False)[:180])
         except Exception as e:  # noqa: BLE001
-            print(f"[FAIL] {url}\n       {e}")
+            msg = str(e).replace("\n", " ")[:150]
+            print(f"--  [{method}] {short}\n     {msg}")
 
-    ok_positions: Optional[List[Dict[str, Any]]] = None
-    for kind in ("positions", "history"):
-        print(f"\n===== {kind} =====")
-        for url in ENDPOINTS[kind]:
-            try:
-                payload = _get_json(session, url, {"portfolioId": pid, "pageNumber": 1, "pageSize": 5}, cfg)
-                data = _unwrap(payload)
-                n = len(data) if isinstance(data, list) else "?"
-                print(f"[OK] {url}  条数={n}")
-                if kind == "positions" and isinstance(data, list):
-                    ok_positions = [normalize_position(r) for r in data if isinstance(r, dict)]
-                    ok_positions = [p for p in ok_positions if p["amount"] > 0]
-                print(json.dumps(payload, ensure_ascii=False)[:1000])
-                break
-            except Exception as e:  # noqa: BLE001
-                print(f"[FAIL] {url}\n       {e}")
+    print("\n===== 结论 =====")
+    if not ok:
+        print("全都没拿到数据。币安可能改了路径，或这台机器的 IP 被 bapi 拦了。")
+        return
+    for kind, (method, url, style) in ok.items():
+        print(f"{kind}: {method} {url}  ({style})")
+    print("\n把上面「结论」这一段发我，我改脚本里的 ENDPOINTS。")
 
-    if ok_positions is not None:
-        print(f"\n===== 当前持仓 {len(ok_positions)} 个 =====")
-        if not ok_positions:
-            print("  （空仓中，这本身也正常）")
-        for p in ok_positions:
-            print(
-                f"  · {p['symbol']:<12} {side_cn(p['side'])} {p['leverage']}x  "
-                f"数量 {fmt_num(p['amount'])}  开仓价 {fmt_num(p['entry_price'])}"
-            )
-        print("\n  拿这个列表和你 App 里「持有仓位」页面对一下：币种、方向一致 = ID 正确。")
-
-    print("\n自检结束。")
 
 
 def main() -> None:
