@@ -1,0 +1,26 @@
+{
+  "portfolio_id": "5075281354358777856",
+  "trader_name": "熬鹰",
+  "poll_interval_sec": 20,
+
+  "notify": {
+    "pushplus_token": "在这里填你的 PushPlus token",
+    "wxpusher_app_token": "",
+    "wxpusher_uids": [],
+    "wecom_webhook": "",
+    "serverchan_key": ""
+  },
+
+  "notify_on": {
+    "open": true,
+    "close": true,
+    "adjust": false
+  },
+
+  "watch_symbols": [],
+  "min_notional_usdt": 0,
+  "adjust_ratio": 0.2,
+  "timeout_sec": 15,
+  "retries": 2,
+  "proxy": ""
+}
