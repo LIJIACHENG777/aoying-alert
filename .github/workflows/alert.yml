@@ -1,4 +1,58 @@
+name: binance-copy-alert
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       test:
-        description: "只发一条测试消息到微信（验证通道）"
+        description: "只发一条测试消息到微信"
+        type: boolean
+        default: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 装依赖
+        run: pip install -r requirements.txt
+
+      - name: 数据源体检
+        run: |
+          echo -n "返回码："
+          curl -s -o /dev/null -w '%{http_code}\n' --max-time 20 \
+            "https://api.kopyon.com/v5/binance-copy-trading/orderHistory?traderId=5075281354358777856&limit=1"
+
+      - name: 读回上次进度
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            state-
+
+      - name: 跑一轮
+        env:
+          PORTFOLIO_ID: ${{ secrets.PORTFOLIO_ID }}
+          TRADER_NAME: 熬鹰
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          if [ "${{ inputs.test }}" = "true" ]; then
+            python alert.py --test
+          else
+            python alert.py --once
+          fi
+
+      - name: 存进度
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
