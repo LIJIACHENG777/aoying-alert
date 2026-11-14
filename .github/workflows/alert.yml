@@ -1,0 +1,52 @@
+name: binance-copy-alert
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: binance-copy-alert
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 环境体检
+        run: |
+          echo "出口 IP：$(curl -s --max-time 10 https://api.ipify.org || echo 取不到)"
+          echo "币安返回码：$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.binance.com/api/v3/ping)"
+          echo "200=通了  451=地区限制"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            state-
+
+      - name: Run once
+        env:
+          PORTFOLIO_ID: ${{ secrets.PORTFOLIO_ID }}
+          TRADER_NAME: 熬鹰
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python alert.py --once
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
