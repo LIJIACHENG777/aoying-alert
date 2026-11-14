@@ -42,7 +42,7 @@ jobs:
           PORTFOLIO_ID: ${{ secrets.PORTFOLIO_ID }}
           TRADER_NAME: 熬鹰
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python alert.py --probe
+        run: python alert.py --once
 
       - name: Save state
         if: always()
